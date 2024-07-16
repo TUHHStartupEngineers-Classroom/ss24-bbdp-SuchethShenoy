@@ -1,0 +1,196 @@
+---
+title: "Sales Dashboard"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+
+# Core
+library(tidyverse)
+
+# Interactive Visualizations
+library(plotly)
+
+# Spatial Data
+library(raster)
+library(sf)
+
+# Currency formatting
+source("plot_sales.R")
+```
+
+```{r}
+# Bike data
+bikes_tbl      <- readRDS("../bike_data_s14/bikes_tbl.rds")
+bikeshops_tbl  <- readRDS("../bike_data_s14/bikeshops_tbl.rds")
+orderlines_tbl <- readRDS("../bike_data_s14/orderlines_tbl.rds")
+
+bike_orderlines_tbl <- orderlines_tbl %>%
+    left_join(bikes_tbl,     by = c("product_id" = "bike_id")) %>%
+    left_join(bikeshops_tbl, by = c("customer_id" = "bikeshop_id")) %>%
+    mutate(total_price = price_euro * quantity)
+
+# German spatial data
+germany_sp <- readRDS("gadm36_DEU_1_sp.rds")
+# Convert SpatialPolygonsDataFrame to an sf dataframe
+germany_sf <- st_as_sf(germany_sp) %>% 
+                  # Add english names
+                  mutate(VARNAME_1 = ifelse(is.na(VARNAME_1), NAME_1, VARNAME_1)) 
+```
+
+
+
+
+
+Sidebar {.sidebar}
+=======================================================================
+
+```{r}
+# Inputs
+dateRangeInput(inputId = "date_range", 
+                     label = h4("Date Range"), 
+                     start = min(bike_orderlines_tbl$order_date),
+                     end = max(bike_orderlines_tbl$order_date), 
+                     min = min(bike_orderlines_tbl$order_date), 
+                     max = max(bike_orderlines_tbl$order_date), 
+                     startview = "year")
+
+selectInput(inputId = "category_1",
+            label = h4("Category 1"),
+            choices = c("All", unique(bike_orderlines_tbl$category_1)),
+            selected = "All")
+
+selectInput(inputId = "category_2",
+            label = h4("Category 2"),
+            choices = c("All", unique(bike_orderlines_tbl$category_2)),
+            selected = "All")
+
+
+sales_data_filtered <- reactive({
+    data_tbl <- bike_orderlines_tbl %>%
+      filter(order_date %>% between(left  = ymd(input$date_range[1]), 
+                                    right = ymd(input$date_range[2])))
+    
+    if (input$category_1 != "All") {
+      data_tbl <- data_tbl %>%
+        filter(category_1 == input$category_1)
+    }
+    
+    if (input$category_2 != "All") {
+      data_tbl <- data_tbl %>%
+        filter(category_2 == input$category_2)
+    }
+    
+    data_tbl
+  })
+```
+
+
+Page 1
+=======================================================================
+
+
+Column {data-height=650 .tabset}
+-----------------------------------------------------------------------
+
+### By State
+
+```{r}
+geo_plot_tbl <- bike_orderlines_tbl %>% 
+                  group_by(state) %>%
+                  summarise(total_revenue = sum(total_price)) %>%
+                  ungroup() %>%
+                  right_join(germany_sf, by = c("state" = "VARNAME_1")) %>% 
+                  mutate(total_revenue = ifelse(is.na(total_revenue), 0, total_revenue)) %>% 
+                  mutate(label_text = str_glue("State: {state}
+                                               Revenue: {format_to_euro(total_revenue)}")) %>% 
+                  st_as_sf()
+
+plot_ly(geo_plot_tbl, 
+        split      = ~NAME_1, 
+        color      = ~total_revenue,
+        colors     = "Blues",
+        stroke     = I("black"),
+        hoverinfo  = 'text', 
+        text       = ~label_text, 
+        hoveron    = "fills", 
+        showlegend = FALSE) 
+
+```
+
+
+Column {data-height=350 .tabset .tabset-fade}
+-----------------------------------------------------------------------
+
+### Over Time
+
+```{r}
+
+plot_total_sales <- function(unit = "month", date_format = "%B %Y", interactive = TRUE, data_tbl) {
+  
+  data_tbl <- data_tbl %>%
+    dplyr::select(order_date, total_price) %>%
+    mutate(date_rounded = floor_date(order_date, unit = unit)) %>%
+    group_by(date_rounded) %>%
+    summarise(total_sales = sum(total_price), .groups = 'drop') %>%
+    ungroup() %>%
+    mutate(label_text = str_glue("Sales: {format_to_euro(total_sales)}\nDate: {date_rounded %>% format(date_format)}"))
+
+  # Make Plot
+  g1 <- data_tbl %>%
+    ggplot(aes(x = date_rounded, y = total_sales)) +
+    geom_point(aes(text = label_text), color = "#2C3E50") +
+    geom_smooth(method = "loess", span = 0.2) +
+    scale_y_continuous(labels = euro_format()) +
+    expand_limits(y = 0) +
+    labs(
+      title = "Total Sales",
+      y = "Revenue (Euro)",
+      x = ""
+    )
+
+  # Static vs Interactive Logic
+  if (interactive) {
+    return(ggplotly(g1, tooltip = "text"))
+  } else {
+    return(g1)
+  }
+}
+
+# Reactive expression to filter sales data
+sales_data_filtered <- reactive({
+  data_tbl <- bike_orderlines_tbl %>%
+    filter(order_date %>% between(left  = ymd(input$date_range[1]), 
+                                  right = ymd(input$date_range[2])))
+  
+  if (input$category_1 != "All") {
+    data_tbl <- data_tbl %>%
+      filter(category_1 == input$category_1)
+  }
+  
+  if (input$category_2 != "All") {
+    data_tbl <- data_tbl %>%
+      filter(category_2 == input$category_2)
+  }
+  
+  data_tbl
+})
+
+output$sales_plot <- renderPlotly({
+  plot_total_sales(
+    unit = "month",
+    date_format = "%B %Y",
+    interactive = TRUE,
+    data_tbl = sales_data_filtered()
+  )
+})
+
+plotlyOutput("sales_plot")
+
+```
+
